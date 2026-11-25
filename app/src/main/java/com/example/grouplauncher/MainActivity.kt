@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.DialogProperties
 import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -46,6 +47,7 @@ sealed class Dlg {
     data class Rename(val id: String, val name: String) : Dlg()
     data class Settings(val id: String) : Dlg()
     data class Pick(val id: String) : Dlg()
+    data class AddTo(val pkg: String) : Dlg()
 }
 
 class MainActivity : ComponentActivity() {
@@ -95,6 +97,9 @@ fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
     val shown = if (query.isBlank()) s.groups else s.groups.filter { g ->
         g.name.contains(query, true) || g.subs.any { it.name.contains(query, true) }
     }
+    val grouped = s.groups.flatMap { it.apps + it.subs.flatMap { sg -> sg.apps } }.toSet()
+    val ungrouped = apps.values.filter { it.pkg !in grouped && (query.isBlank() || it.label.contains(query, true)) }
+        .sortedBy { it.label.lowercase() }
     Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
         LazyColumn(
             Modifier.fillMaxSize().statusBarsPadding(),
@@ -118,6 +123,11 @@ fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
                         Box {
                             IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Menú", tint = Color.White) }
                             DropdownMenu(menu, { menu = false }) {
+                                val notifOn = androidx.core.app.NotificationManagerCompat.getEnabledListenerPackages(ctx).contains(ctx.packageName)
+                                if (!notifOn) DropdownMenuItem({ Text("Activar insignias de notificaciones") }, {
+                                    menu = false
+                                    ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                                })
                                 DropdownMenuItem({ Text("Launcher predeterminado…") }, { menu = false; openHomeSettings(ctx) })
                             }
                         }
@@ -126,11 +136,19 @@ fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
             }
             if (s.groups.isEmpty()) item {
                 Text("Pulsa ✎ y luego + para crear tu primer grupo.", color = Color.White.copy(.8f))
-            } else if (shown.isEmpty()) item {
+            } else if (shown.isEmpty() && ungrouped.isEmpty()) item {
                 Text("Sin resultados para “$query”.", color = Color.White.copy(.8f))
             }
             items(shown, key = { it.id }) { g ->
                 GroupCard(g, s.groups.indexOf(g), s, apps, onDlg = { dlg = it })
+            }
+            if (ungrouped.isNotEmpty()) item {
+                Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xCC15171C)).padding(14.dp)) {
+                    Text("Sin grupo", fontSize = 18.sp, color = Color.White)
+                    Text("Mantén pulsada una app para añadirla a un grupo", fontSize = 12.sp, color = Color.White.copy(.6f))
+                    Spacer(Modifier.height(8.dp))
+                    AppGrid(ungrouped.map { it.pkg }, Group(name = "", rows = 4), apps, onAdd = { dlg = Dlg.AddTo(it) })
+                }
             }
         }
     }
@@ -187,7 +205,7 @@ fun MiniBtn(icon: androidx.compose.ui.graphics.vector.ImageVector, onClick: () -
 /** Cuadrícula paginada: cols × rows por página, deslizable horizontalmente. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun AppGrid(pkgs: List<String>, cfg: Group, apps: Map<String, AppInfo>, onRemove: (String) -> Unit) {
+fun AppGrid(pkgs: List<String>, cfg: Group, apps: Map<String, AppInfo>, onAdd: ((String) -> Unit)? = null, onRemove: ((String) -> Unit)? = null) {
     val list = pkgs.mapNotNull { apps[it] }
     if (list.isEmpty()) { Text("Vacío", color = Color.White.copy(.5f), fontSize = 13.sp); return }
     val pages = list.chunked(cfg.cols * cfg.rows)
@@ -197,7 +215,7 @@ fun AppGrid(pkgs: List<String>, cfg: Group, apps: Map<String, AppInfo>, onRemove
         Column {
             pages[p].chunked(cfg.cols).forEach { row ->
                 Row(Modifier.fillMaxWidth().height(cellH)) {
-                    row.forEach { a -> Box(Modifier.weight(1f)) { Cell(a, cfg.size, onRemove) } }
+                    row.forEach { a -> Box(Modifier.weight(1f)) { Cell(a, cfg.size, onRemove, onAdd) } }
                     repeat(cfg.cols - row.size) { Spacer(Modifier.weight(1f)) }
                 }
             }
@@ -213,7 +231,7 @@ fun AppGrid(pkgs: List<String>, cfg: Group, apps: Map<String, AppInfo>, onRemove
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun Cell(a: AppInfo, size: Int, onRemove: (String) -> Unit) {
+fun Cell(a: AppInfo, size: Int, onRemove: ((String) -> Unit)?, onAdd: ((String) -> Unit)?) {
     val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
     Column(
@@ -223,10 +241,19 @@ fun Cell(a: AppInfo, size: Int, onRemove: (String) -> Unit) {
         ).padding(2.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
-        Image(a.icon, a.label, Modifier.size(size.dp))
+        Box {
+            Image(a.icon, a.label, Modifier.size(size.dp))
+            val n = Badges.counts[a.pkg] ?: 0
+            if (n > 0) Box(
+                Modifier.align(Alignment.TopEnd).offset(6.dp, (-4).dp).defaultMinSize(18.dp, 18.dp)
+                    .clip(CircleShape).background(Color(0xFFE53935)).padding(horizontal = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) { Text(if (n > 99) "99+" else "$n", color = Color.White, fontSize = 10.sp) }
+        }
         Text(a.label, color = Color.White, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, textAlign = TextAlign.Center)
         DropdownMenu(menu, { menu = false }) {
-            DropdownMenuItem({ Text("Quitar del grupo") }, { menu = false; onRemove(a.pkg) })
+            if (onRemove != null) DropdownMenuItem({ Text("Quitar del grupo") }, { menu = false; onRemove(a.pkg) })
+            if (onAdd != null) DropdownMenuItem({ Text("Añadir a un grupo…") }, { menu = false; onAdd(a.pkg) })
             DropdownMenuItem({ Text("Info de la app") }, {
                 menu = false
                 ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${a.pkg}")))
@@ -265,25 +292,49 @@ fun DialogHost(d: Dlg?, close: () -> Unit, s: LauncherState, apps: Map<String, A
         is Dlg.Pick -> {
             val g = (s.groups + s.groups.flatMap { it.subs }).find { it.id == d.id } ?: return
             var sel by remember { mutableStateOf(g.apps) }
+            var q by remember { mutableStateOf("") }
+            val list = apps.values.filter { q.isBlank() || it.label.contains(q, true) }.sortedBy { it.label.lowercase() }
             AlertDialog(onDismissRequest = close,
+                modifier = Modifier.fillMaxWidth(0.94f),
+                properties = DialogProperties(usePlatformDefaultWidth = false),
                 title = { Text("Apps en ${g.name}") },
                 confirmButton = { TextButton({ s.upd(g.id) { it.copy(apps = sel) }; close() }) { Text("Guardar") } },
                 dismissButton = { TextButton(close) { Text("Cancelar") } },
                 text = {
-                    LazyColumn(Modifier.heightIn(max = 420.dp)) {
-                        items(apps.values.sortedBy { it.label.lowercase() }, key = { it.pkg }) { a ->
-                            val on = a.pkg in sel
-                            Row(Modifier.fillMaxWidth().clickable { sel = if (on) sel - a.pkg else sel + a.pkg }.padding(vertical = 4.dp),
-                                verticalAlignment = Alignment.CenterVertically) {
-                                Checkbox(on, null)
-                                Image(a.icon, null, Modifier.size(32.dp))
-                                Spacer(Modifier.width(10.dp))
-                                Text(a.label, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    Column {
+                        OutlinedTextField(q, { q = it }, Modifier.fillMaxWidth(), singleLine = true,
+                            placeholder = { Text("Buscar app…") },
+                            leadingIcon = { Icon(Icons.Default.Search, null) },
+                            trailingIcon = if (q.isNotEmpty()) ({ IconButton({ q = "" }) { Icon(Icons.Default.Close, null) } }) else null)
+                        Spacer(Modifier.height(8.dp))
+                        LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                            items(list, key = { it.pkg }) { a ->
+                                val on = a.pkg in sel
+                                Row(Modifier.fillMaxWidth().clickable { sel = if (on) sel - a.pkg else sel + a.pkg }.padding(vertical = 8.dp),
+                                    verticalAlignment = Alignment.CenterVertically) {
+                                    Checkbox(on, null)
+                                    Spacer(Modifier.width(8.dp))
+                                    Image(a.icon, null, Modifier.size(48.dp))
+                                    Spacer(Modifier.width(14.dp))
+                                    Text(a.label, fontSize = 17.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                }
                             }
                         }
                     }
                 })
         }
+        is Dlg.AddTo -> AlertDialog(onDismissRequest = close,
+            confirmButton = { TextButton(close) { Text("Cancelar") } },
+            title = { Text("Añadir a…") },
+            text = {
+                if (s.groups.isEmpty()) Text("Primero crea un grupo (✎ y luego +).")
+                else LazyColumn(Modifier.heightIn(max = 420.dp)) {
+                    s.groups.forEach { g ->
+                        item { AddRow(g.name, 0) { s.upd(g.id) { it.copy(apps = it.apps + d.pkg) }; close() } }
+                        g.subs.forEach { sg -> item { AddRow("↳ ${sg.name}", 20) { s.upd(sg.id) { it.copy(apps = it.apps + d.pkg) }; close() } } }
+                    }
+                }
+            })
     }
 }
 
@@ -303,3 +354,8 @@ fun NameDialog(title: String, init: String, close: () -> Unit, ok: (String) -> U
         confirmButton = { TextButton({ if (t.isNotBlank()) { ok(t.trim()); close() } }) { Text("Aceptar") } },
         dismissButton = { TextButton(close) { Text("Cancelar") } })
 }
+
+@Composable
+fun AddRow(label: String, indent: Int, onClick: () -> Unit) =
+    Text(label, fontSize = 17.sp, modifier = Modifier.fillMaxWidth().clickable(onClick = onClick)
+        .padding(start = indent.dp, top = 12.dp, bottom = 12.dp))
