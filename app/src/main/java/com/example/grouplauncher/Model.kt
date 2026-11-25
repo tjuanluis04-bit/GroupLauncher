@@ -15,16 +15,18 @@ data class Group(
     val size: Int = 52,
     val apps: List<String> = emptyList(),
     val subs: List<Group> = emptyList(),
+    val color: Long = 0x15171C,
 )
 
 fun Group.toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("cols", cols)
     .put("rows", rows).put("size", size).put("apps", JSONArray(apps))
-    .put("subs", JSONArray(subs.map { it.toJson() }))
+    .put("subs", JSONArray(subs.map { it.toJson() })).put("color", color)
 
 fun JSONObject.toGroup(): Group = Group(
     getString("id"), getString("name"), getInt("cols"), getInt("rows"), getInt("size"),
     getJSONArray("apps").let { a -> List(a.length()) { a.getString(it) } },
     getJSONArray("subs").let { a -> List(a.length()) { a.getJSONObject(it).toGroup() } },
+    optLong("color", 0x15171C),
 )
 
 class LauncherState(private val ctx: Context) {

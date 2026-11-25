@@ -1,5 +1,6 @@
 package com.example.grouplauncher
 
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -23,6 +24,8 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
@@ -73,11 +76,25 @@ class MainActivity : ComponentActivity() {
     }
 }
 
-private val Card0 = Color(0xCC15171C)
+/** Colores de fondo de las tarjetas (la opacidad es siempre la misma: 0xCC). */
+val Palette = listOf<Long>(0x15171C, 0x1E1B4B, 0x4A1D6B, 0x831843, 0x7F1D1D, 0x78350F, 0x1B4332, 0x134E4A, 0x0C4A6E, 0x374151)
+
+fun openHomeSettings(ctx: Context) {
+    try { ctx.startActivity(Intent(Settings.ACTION_HOME_SETTINGS)) }
+    catch (e: Exception) { ctx.startActivity(Intent(Settings.ACTION_SETTINGS)) }
+}
 
 @Composable
 fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
+    val ctx = LocalContext.current
     var dlg by remember { mutableStateOf<Dlg?>(null) }
+    var searching by remember { mutableStateOf(false) }
+    var query by remember { mutableStateOf("") }
+    var menu by remember { mutableStateOf(false) }
+    val fr = remember { FocusRequester() }
+    val shown = if (query.isBlank()) s.groups else s.groups.filter { g ->
+        g.name.contains(query, true) || g.subs.any { it.name.contains(query, true) }
+    }
     Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
         LazyColumn(
             Modifier.fillMaxSize().statusBarsPadding(),
@@ -86,19 +103,34 @@ fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
         ) {
             item {
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Mis grupos", fontSize = 26.sp, color = Color.White, modifier = Modifier.weight(1f))
-                    if (s.edit) FilledTonalIconButton({ dlg = Dlg.NewGroup }) { Icon(Icons.Default.Add, "Nuevo grupo") }
-                    IconButton({ s.edit = !s.edit }) {
-                        Icon(if (s.edit) Icons.Default.Check else Icons.Default.Edit, "Editar", tint = Color.White)
+                    if (searching) {
+                        OutlinedTextField(query, { query = it }, Modifier.weight(1f).focusRequester(fr),
+                            singleLine = true, placeholder = { Text("Buscar grupo…") })
+                        LaunchedEffect(Unit) { fr.requestFocus() }
+                        IconButton({ searching = false; query = "" }) { Icon(Icons.Default.Close, "Cerrar", tint = Color.White) }
+                    } else {
+                        Text("Mis grupos", fontSize = 26.sp, color = Color.White, modifier = Modifier.weight(1f))
+                        IconButton({ searching = true }) { Icon(Icons.Default.Search, "Buscar", tint = Color.White) }
+                        if (s.edit) FilledTonalIconButton({ dlg = Dlg.NewGroup }) { Icon(Icons.Default.Add, "Nuevo grupo") }
+                        IconButton({ s.edit = !s.edit }) {
+                            Icon(if (s.edit) Icons.Default.Check else Icons.Default.Edit, "Editar", tint = Color.White)
+                        }
+                        Box {
+                            IconButton({ menu = true }) { Icon(Icons.Default.MoreVert, "Menú", tint = Color.White) }
+                            DropdownMenu(menu, { menu = false }) {
+                                DropdownMenuItem({ Text("Launcher predeterminado…") }, { menu = false; openHomeSettings(ctx) })
+                            }
+                        }
                     }
                 }
             }
             if (s.groups.isEmpty()) item {
                 Text("Pulsa ✎ y luego + para crear tu primer grupo.", color = Color.White.copy(.8f))
+            } else if (shown.isEmpty()) item {
+                Text("Sin resultados para “$query”.", color = Color.White.copy(.8f))
             }
-            items(s.groups, key = { it.id }) { g ->
-                val idx = s.groups.indexOf(g)
-                GroupCard(g, idx, s, apps, onDlg = { dlg = it })
+            items(shown, key = { it.id }) { g ->
+                GroupCard(g, s.groups.indexOf(g), s, apps, onDlg = { dlg = it })
             }
         }
     }
@@ -107,7 +139,7 @@ fun Root(s: LauncherState, apps: Map<String, AppInfo>) {
 
 @Composable
 fun GroupCard(g: Group, idx: Int, s: LauncherState, apps: Map<String, AppInfo>, onDlg: (Dlg) -> Unit) {
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Card0).padding(14.dp)) {
+    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Color(0xCC000000L or g.color)).padding(14.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(g.name, fontSize = 18.sp, color = Color.White, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
             if (s.edit) {
@@ -218,6 +250,15 @@ fun DialogHost(d: Dlg?, close: () -> Unit, s: LauncherState, apps: Map<String, A
                         Sl("Columnas", g.cols, 2..8) { v -> s.upd(g.id) { it.copy(cols = v) } }
                         Sl("Filas por página", g.rows, 1..6) { v -> s.upd(g.id) { it.copy(rows = v) } }
                         Sl("Tamaño de icono", g.size, 32..96) { v -> s.upd(g.id) { it.copy(size = v) } }
+                        Text("Color del fondo", fontSize = 14.sp)
+                        Row(Modifier.horizontalScroll(rememberScrollState()).padding(top = 8.dp), Arrangement.spacedBy(8.dp)) {
+                            Palette.forEach { c ->
+                                val on = g.color == c
+                                Box(Modifier.size(34.dp).clip(CircleShape).background(Color(0xFF000000L or c))
+                                    .border(if (on) 3.dp else 1.dp, if (on) Color.White else Color.Gray, CircleShape)
+                                    .clickable { s.upd(g.id) { it.copy(color = c) } })
+                            }
+                        }
                     }
                 })
         }
