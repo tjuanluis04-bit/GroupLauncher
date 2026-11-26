@@ -12,6 +12,21 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.9" }
+      - name: Descargar tipografías (Google Fonts)
+        run: |
+          mkdir -p app/src/main/assets/fonts
+          B=https://raw.githubusercontent.com/google/fonts/main/ofl
+          dl() { curl -fsSL "$B/$1" -o "app/src/main/assets/fonts/$2.ttf" || echo "omitida $2"; }
+          dl pacifico/Pacifico-Regular.ttf pacifico
+          dl lobster/Lobster-Regular.ttf lobster
+          dl bebasneue/BebasNeue-Regular.ttf bebasneue
+          dl righteous/Righteous-Regular.ttf righteous
+          dl abrilfatface/AbrilFatface-Regular.ttf abrilfatface
+          dl satisfy/Satisfy-Regular.ttf satisfy
+          dl permanentmarker/PermanentMarker-Regular.ttf permanentmarker
+          dl monoton/Monoton-Regular.ttf monoton
+          dl "dancingscript/DancingScript%5Bwght%5D.ttf" dancingscript
+          dl "playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" playfair
       - run: gradle assembleDebug --no-daemon
       - uses: actions/upload-artifact@v4
         with:
