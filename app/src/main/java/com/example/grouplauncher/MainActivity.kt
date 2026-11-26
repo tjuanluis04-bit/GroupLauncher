@@ -1,6 +1,10 @@
 package com.example.grouplauncher
 
+import android.appwidget.AppWidgetHost
+import android.appwidget.AppWidgetManager
+import android.appwidget.AppWidgetProviderInfo
 import android.content.Context
+import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
@@ -14,6 +18,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -35,12 +40,15 @@ import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.DialogProperties
@@ -48,7 +56,26 @@ import androidx.core.graphics.drawable.toBitmap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
-data class AppInfo(val pkg: String, val label: String, val icon: ImageBitmap)
+data class AppInfo(val pkg: String, val label: String, val icon: ImageBitmap, val installed: Long = 0)
+
+/** Apps instaladas en los últimos 7 días y aún no abiertas desde el launcher => "NUEVA". */
+object NewTracker {
+    private lateinit var prefs: SharedPreferences
+    var seen by mutableStateOf(setOf<String>())
+    fun init(ctx: Context) {
+        prefs = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
+        seen = prefs.getStringSet("seen", emptySet())!!.toSet()
+    }
+    fun mark(p: String) { if (p in seen) return; seen = seen + p; prefs.edit().putStringSet("seen", seen).apply() }
+    fun isNew(a: AppInfo) = a.installed > System.currentTimeMillis() - 7L * 24 * 3600 * 1000 && a.pkg !in seen
+}
+
+object WidgetBridge {
+    lateinit var host: AppWidgetHost
+    var add: (AppWidgetProviderInfo, String) -> Unit = { _, _ -> }
+}
+
+class WItem(val info: AppWidgetProviderInfo, val label: String, val app: String, val preview: ImageBitmap?)
 
 sealed class Dlg {
     object NewGroup : Dlg()
@@ -57,6 +84,7 @@ sealed class Dlg {
     data class Settings(val id: String) : Dlg()
     data class Pick(val id: String) : Dlg()
     data class AddTo(val pkgs: List<String>) : Dlg()
+    data class Widgets(val pageId: String) : Dlg()
 }
 
 /** Estado de selección múltiple (tarjeta "Sin grupo"). */
@@ -93,10 +121,52 @@ fun openHomeSettings(ctx: Context) {
 class MainActivity : ComponentActivity() {
     private var tick by mutableIntStateOf(0)
     private lateinit var state: LauncherState
+    private lateinit var host: AppWidgetHost
+    private lateinit var awm: AppWidgetManager
+    private var pendingId = -1
+    private var pendingPage = ""
+
+    @Suppress("DEPRECATION")
+    private fun startAddWidget(info: AppWidgetProviderInfo, pageId: String) {
+        val id = host.allocateAppWidgetId()
+        pendingId = id; pendingPage = pageId
+        if (awm.bindAppWidgetIdIfAllowed(id, info.provider)) configureOrAdd(info, id)
+        else startActivityForResult(
+            Intent(AppWidgetManager.ACTION_APPWIDGET_BIND)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_ID, id)
+                .putExtra(AppWidgetManager.EXTRA_APPWIDGET_PROVIDER, info.provider), 7001)
+    }
+
+    private fun configureOrAdd(info: AppWidgetProviderInfo, id: Int) {
+        if (info.configure != null) host.startAppWidgetConfigureActivityForResult(this, id, 0, 7002, null)
+        else finishAdd(info, id)
+    }
+
+    private fun finishAdd(info: AppWidgetProviderInfo, id: Int) {
+        val dp = (info.minHeight / resources.displayMetrics.density).toInt().coerceIn(80, 420)
+        state.addWidget(pendingPage, "$id:$dp")
+    }
+
+    @Suppress("OVERRIDE_DEPRECATION", "DEPRECATION")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != 7001 && requestCode != 7002) return
+        val info = awm.getAppWidgetInfo(pendingId)
+        when {
+            requestCode == 7001 && resultCode == RESULT_OK && info != null -> configureOrAdd(info, pendingId)
+            requestCode == 7002 && resultCode == RESULT_OK && info != null -> finishAdd(info, pendingId)
+            else -> host.deleteAppWidgetId(pendingId)
+        }
+    }
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         state = LauncherState(this)
+        NewTracker.init(this)
+        host = AppWidgetHost(this, 1024)
+        awm = AppWidgetManager.getInstance(this)
+        WidgetBridge.host = host
+        WidgetBridge.add = this::startAddWidget
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8AB4F8))) {
                 var apps by remember { mutableStateOf(emptyMap<String, AppInfo>()) }
@@ -108,6 +178,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); state.drawerOpen = false } // botón Home
     override fun onResume() { super.onResume(); tick++ }
+    override fun onStart() { super.onStart(); runCatching { host.startListening() } }
+    override fun onStop() { super.onStop(); runCatching { host.stopListening() } }
 
     private fun loadApps(): Map<String, AppInfo> {
         val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
@@ -115,7 +187,8 @@ class MainActivity : ComponentActivity() {
             .filter { it.activityInfo.packageName != packageName }
             .associate {
                 val p = it.activityInfo.packageName
-                p to AppInfo(p, it.loadLabel(packageManager).toString(), it.loadIcon(packageManager).toBitmap(144, 144).asImageBitmap())
+                p to AppInfo(p, it.loadLabel(packageManager).toString(), it.loadIcon(packageManager).toBitmap(144, 144).asImageBitmap(),
+                    runCatching { packageManager.getPackageInfo(p, 0).firstInstallTime }.getOrDefault(0L))
             }
     }
 }
@@ -125,9 +198,9 @@ fun App(s: LauncherState, apps: Map<String, AppInfo>) {
     val showDrawer = s.drawerOpen || !s.homeEnabled
     BackHandler(showDrawer && s.homeEnabled) { s.drawerOpen = false }
     Box(Modifier.fillMaxSize()) {
-        if (s.homeEnabled) HomeScreen(s, apps)
+        if (s.homeEnabled && !s.drawerOpen) HomeScreen(s, apps)
         AnimatedVisibility(showDrawer, enter = slideInVertically { it }, exit = slideOutVertically { it }) {
-            Box(Modifier.fillMaxSize().background(if (s.homeEnabled) Color(0xF2101018) else Color.Transparent)) { Drawer(s, apps) }
+            Box(Modifier.fillMaxSize()) { Drawer(s, apps) }
         }
     }
 }
@@ -149,7 +222,8 @@ fun HomeScreen(s: LauncherState, apps: Map<String, AppInfo>) {
     }) {
         HorizontalPager(pager, Modifier.fillMaxSize()) { i ->
             val pg = pages[i]
-            Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
+            Column(Modifier.fillMaxSize().pointerInput(pg.id) { detectTapGestures(onLongPress = { dlg = Dlg.Widgets(pg.id) }) }
+                    .statusBarsPadding().navigationBarsPadding().padding(16.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Spacer(Modifier.size(48.dp))
                     Text(pg.name, Modifier.weight(1f), color = Color.White, fontSize = 30.sp, textAlign = TextAlign.Center,
@@ -158,11 +232,13 @@ fun HomeScreen(s: LauncherState, apps: Map<String, AppInfo>) {
                 }
                 if (s.edit) Row(Modifier.horizontalScroll(rememberScrollState())) {
                     TextButton({ dlg = Dlg.Pick(pg.id) }) { Text("+ Apps") }
+                    TextButton({ dlg = Dlg.Widgets(pg.id) }) { Text("+ Widget") }
                     TextButton({ dlg = Dlg.Rename(pg.id, pg.name) }) { Text("Título") }
                     TextButton({ dlg = Dlg.Settings(pg.id) }) { Text("Ajustes") }
                     TextButton({ s.saveHome(s.home + Group(name = "Página ${s.home.size + 1}", rows = 5, size = 56)) }) { Text("+ Página") }
                     if (pages.size > 1) TextButton({ s.saveHome(s.home - pg) }) { Text("Borrar") }
                 }
+                pg.widgets.forEach { e -> WidgetView(e, pg, s) }
                 Box(Modifier.weight(1f).padding(top = 8.dp)) { HomeGrid(pg, s, apps) }
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (pages.size > 1) Row {
@@ -198,6 +274,81 @@ fun HomeGrid(pg: Group, s: LauncherState, apps: Map<String, AppInfo>) {
     }
 }
 
+@Composable
+fun WidgetView(entry: String, pg: Group, s: LauncherState) {
+    val ctx = LocalContext.current
+    val parts = entry.split(":")
+    val id = parts[0].toIntOrNull() ?: return
+    val h = parts.getOrNull(1)?.toIntOrNull() ?: 120
+    val info = remember(id) { AppWidgetManager.getInstance(ctx).getAppWidgetInfo(id) }
+    val w = LocalConfiguration.current.screenWidthDp - 32
+    fun setH(n: Int) = s.upd(pg.id) { p -> p.copy(widgets = p.widgets.map { if (it == entry) "$id:${n.coerceIn(60, 600)}" else it }) }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
+        if (s.edit) Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Widget · ${h}dp", color = Color.White.copy(.7f), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            MiniBtn(Icons.Default.KeyboardArrowUp) { setH(h + 40) }
+            MiniBtn(Icons.Default.KeyboardArrowDown) { setH(h - 40) }
+            MiniBtn(Icons.Default.Delete) {
+                runCatching { WidgetBridge.host.deleteAppWidgetId(id) }
+                s.upd(pg.id) { p -> p.copy(widgets = p.widgets - entry) }
+            }
+        }
+        if (info == null) Text("Widget no disponible", color = Color.White.copy(.5f))
+        else AndroidView(
+            factory = { c -> WidgetBridge.host.createView(c, id, info) },
+            update = { v -> v.updateAppWidgetSize(null, w, h, w, h) },
+            modifier = Modifier.fillMaxWidth().height(h.dp),
+        )
+    }
+}
+
+@Composable
+fun WidgetPicker(pageId: String, close: () -> Unit) {
+    val ctx = LocalContext.current
+    var loaded by remember { mutableStateOf<List<WItem>?>(null) }
+    LaunchedEffect(Unit) {
+        loaded = withContext(Dispatchers.Default) {
+            val pm = ctx.packageManager
+            AppWidgetManager.getInstance(ctx).installedProviders.map { i ->
+                val app = runCatching { pm.getApplicationLabel(pm.getApplicationInfo(i.provider.packageName, 0)).toString() }
+                    .getOrDefault(i.provider.packageName)
+                val pv = runCatching {
+                    i.loadPreviewImage(ctx, 0)?.let { d ->
+                        val iw = d.intrinsicWidth.coerceAtLeast(1); val ih = d.intrinsicHeight.coerceAtLeast(1)
+                        val sc = 320f / maxOf(iw, ih)
+                        d.toBitmap((iw * sc).toInt().coerceAtLeast(1), (ih * sc).toInt().coerceAtLeast(1)).asImageBitmap()
+                    }
+                }.getOrNull()
+                WItem(i, i.loadLabel(pm).toString(), app, pv)
+            }.sortedWith(compareBy({ it.app.lowercase() }, { it.label.lowercase() }))
+        }
+    }
+    AlertDialog(onDismissRequest = close,
+        modifier = Modifier.fillMaxWidth(0.94f),
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        title = { Text("Añadir widget") },
+        confirmButton = { TextButton(close) { Text("Cancelar") } },
+        text = {
+            val list = loaded
+            if (list == null) Text("Cargando…")
+            else LazyColumn(Modifier.heightIn(max = 480.dp)) {
+                items(list) { w ->
+                    Row(Modifier.fillMaxWidth().clickable { WidgetBridge.add(w.info, pageId); close() }.padding(vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically) {
+                        Box(Modifier.size(84.dp), contentAlignment = Alignment.Center) {
+                            if (w.preview != null) Image(w.preview, null, Modifier.fillMaxSize()) else Icon(Icons.Default.Add, null)
+                        }
+                        Spacer(Modifier.width(12.dp))
+                        Column {
+                            Text(w.label, fontSize = 16.sp)
+                            Text(w.app, fontSize = 12.sp, color = Color.Gray)
+                        }
+                    }
+                }
+            }
+        })
+}
+
 // ───────────── CAJÓN DE APPS ─────────────
 @Composable
 fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
@@ -213,7 +364,7 @@ fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
     }
     val grouped = s.groups.flatMap { it.apps + it.subs.flatMap { sg -> sg.apps } }.toSet()
     val ungrouped = apps.values.filter { it.pkg !in grouped && (query.isBlank() || it.label.contains(query, true)) }
-        .sortedBy { it.label.lowercase() }
+        .sortedWith(compareBy({ !NewTracker.isNew(it) }, { it.label.lowercase() }))
     Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
         LazyColumn(
             Modifier.fillMaxSize().statusBarsPadding(),
@@ -369,13 +520,17 @@ fun Cell(a: AppInfo, size: Int, onRemove: ((String) -> Unit)?, onAdd: ((String) 
     val selecting = sel?.on == true
     Column(
         Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).combinedClickable(
-            onClick = { if (selecting) sel!!.toggle(a.pkg) else ctx.packageManager.getLaunchIntentForPackage(a.pkg)?.let(ctx::startActivity) },
+            onClick = { if (selecting) sel!!.toggle(a.pkg) else { NewTracker.mark(a.pkg); ctx.packageManager.getLaunchIntentForPackage(a.pkg)?.let(ctx::startActivity) } },
             onLongClick = { if (selecting) sel!!.toggle(a.pkg) else menu = true },
         ).padding(2.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
         Box {
             Image(a.icon, a.label, Modifier.size(size.dp))
+            if (sel != null && NewTracker.isNew(a)) Box(
+                Modifier.align(Alignment.TopStart).offset((-4).dp, (-4).dp).clip(RoundedCornerShape(50))
+                    .background(Color(0xFF2E7D32)).padding(horizontal = 5.dp, vertical = 1.dp),
+            ) { Text("NUEVA", color = Color.White, fontSize = 8.sp, fontWeight = FontWeight.Bold) }
             val n = Badges.counts[a.pkg] ?: 0
             if (n > 0) Box(
                 Modifier.align(Alignment.TopEnd).offset(6.dp, (-4).dp).defaultMinSize(18.dp, 18.dp)
@@ -413,6 +568,7 @@ fun DialogHost(d: Dlg?, close: () -> Unit, s: LauncherState, apps: Map<String, A
         is Dlg.NewSub -> NameDialog("Nuevo subgrupo", "", close) { n -> s.upd(d.parent) { it.copy(subs = it.subs + Group(name = n)) } }
         is Dlg.Rename -> NameDialog("Renombrar", d.name, close) { n -> s.upd(d.id) { it.copy(name = n) } }
         is Dlg.Settings -> s.find(d.id)?.let { SettingsDialog(it, s, close) }
+        is Dlg.Widgets -> WidgetPicker(d.pageId, close)
         is Dlg.Pick -> {
             val g = s.find(d.id) ?: return
             var sel by remember { mutableStateOf(g.apps) }

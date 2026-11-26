@@ -17,11 +17,12 @@ data class Group(
     val subs: List<Group> = emptyList(),
     val color: Long = 0x15171C,
     val font: Int = 0,
+    val widgets: List<String> = emptyList(), // "idWidget:alturaDp"
 )
 
 fun Group.toJson(): JSONObject = JSONObject().put("id", id).put("name", name).put("cols", cols)
     .put("rows", rows).put("size", size).put("apps", JSONArray(apps))
-    .put("subs", JSONArray(subs.map { it.toJson() })).put("color", color).put("font", font)
+    .put("subs", JSONArray(subs.map { it.toJson() })).put("color", color).put("font", font).put("widgets", JSONArray(widgets))
 
 fun JSONObject.toGroup(): Group = Group(
     getString("id"), getString("name"), getInt("cols"), getInt("rows"), getInt("size"),
@@ -29,6 +30,7 @@ fun JSONObject.toGroup(): Group = Group(
     getJSONArray("subs").let { a -> List(a.length()) { a.getJSONObject(it).toGroup() } },
     optLong("color", 0x15171C),
     optInt("font", 0),
+    optJSONArray("widgets")?.let { a -> List(a.length()) { a.getString(it) } } ?: emptyList(),
 )
 
 class LauncherState(private val ctx: Context) {
@@ -55,6 +57,7 @@ class LauncherState(private val ctx: Context) {
         private set
     fun saveHome(l: List<Group>) { home = l; prefs.edit().putString("home", JSONArray(l.map { it.toJson() }).toString()).apply() }
     fun saveUng(g: Group) { ung = g; prefs.edit().putString("ung", JSONArray(listOf(g.toJson())).toString()).apply() }
+    fun addWidget(pageId: String, entry: String) = saveHome(home.map { if (it.id == pageId) it.copy(widgets = it.widgets + entry) else it })
     fun toggleHome() { homeEnabled = !homeEnabled; prefs.edit().putBoolean("homeOn", homeEnabled).apply() }
     fun find(id: String): Group? = (groups + groups.flatMap { it.subs } + home + ung).find { it.id == id }
 
