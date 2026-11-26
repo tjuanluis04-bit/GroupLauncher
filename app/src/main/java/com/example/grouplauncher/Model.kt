@@ -53,8 +53,8 @@ class LauncherState(private val ctx: Context) {
     /** Configuración de la tarjeta "Sin grupo". */
     var ung by mutableStateOf(load("ung", listOf(Group(id = "ungrouped", name = "Sin grupo", rows = 4))).first())
         private set
-    fun setHome(l: List<Group>) { home = l; prefs.edit().putString("home", JSONArray(l.map { it.toJson() }).toString()).apply() }
-    fun setUng(g: Group) { ung = g; prefs.edit().putString("ung", JSONArray(listOf(g.toJson())).toString()).apply() }
+    fun saveHome(l: List<Group>) { home = l; prefs.edit().putString("home", JSONArray(l.map { it.toJson() }).toString()).apply() }
+    fun saveUng(g: Group) { ung = g; prefs.edit().putString("ung", JSONArray(listOf(g.toJson())).toString()).apply() }
     fun toggleHome() { homeEnabled = !homeEnabled; prefs.edit().putBoolean("homeOn", homeEnabled).apply() }
     fun find(id: String): Group? = (groups + groups.flatMap { it.subs } + home + ung).find { it.id == id }
 
@@ -65,8 +65,8 @@ class LauncherState(private val ctx: Context) {
 
     /** Actualiza un grupo o subgrupo por id. */
     fun upd(id: String, f: (Group) -> Group) {
-        if (id == ung.id) return setUng(f(ung))
-        if (home.any { it.id == id }) return setHome(home.map { if (it.id == id) f(it) else it })
+        if (id == ung.id) return saveUng(f(ung))
+        if (home.any { it.id == id }) return saveHome(home.map { if (it.id == id) f(it) else it })
         set(groups.map { g -> if (g.id == id) f(g) else g.copy(subs = g.subs.map { if (it.id == id) f(it) else it }) })
     }
 

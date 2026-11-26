@@ -22,8 +22,8 @@ jobs:
           dl bebasneue/BebasNeue-Regular.ttf bebasneue
           dl righteous/Righteous-Regular.ttf righteous
           dl abrilfatface/AbrilFatface-Regular.ttf abrilfatface
-          dl satisfy/Satisfy-Regular.ttf satisfy
-          dl permanentmarker/PermanentMarker-Regular.ttf permanentmarker
+          dl ../apache/satisfy/Satisfy-Regular.ttf satisfy
+          dl ../apache/permanentmarker/PermanentMarker-Regular.ttf permanentmarker
           dl monoton/Monoton-Regular.ttf monoton
           dl "dancingscript/DancingScript%5Bwght%5D.ttf" dancingscript
           dl "playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" playfair

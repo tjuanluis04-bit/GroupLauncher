@@ -160,8 +160,8 @@ fun HomeScreen(s: LauncherState, apps: Map<String, AppInfo>) {
                     TextButton({ dlg = Dlg.Pick(pg.id) }) { Text("+ Apps") }
                     TextButton({ dlg = Dlg.Rename(pg.id, pg.name) }) { Text("Título") }
                     TextButton({ dlg = Dlg.Settings(pg.id) }) { Text("Ajustes") }
-                    TextButton({ s.setHome(s.home + Group(name = "Página ${s.home.size + 1}", rows = 5, size = 56)) }) { Text("+ Página") }
-                    if (pages.size > 1) TextButton({ s.setHome(s.home - pg) }) { Text("Borrar") }
+                    TextButton({ s.saveHome(s.home + Group(name = "Página ${s.home.size + 1}", rows = 5, size = 56)) }) { Text("+ Página") }
+                    if (pages.size > 1) TextButton({ s.saveHome(s.home - pg) }) { Text("Borrar") }
                 }
                 Box(Modifier.weight(1f).padding(top = 8.dp)) { HomeGrid(pg, s, apps) }
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
