@@ -322,7 +322,7 @@ fun HomeGrid(pg: Group, s: LauncherState, apps: Map<String, AppInfo>) {
                                     val to = (from + dc + dr * pg.cols).coerceIn(0, vis.size - 1)
                                     if (from >= 0 && to != from) {
                                         val v = vis.toMutableList().also { it.removeAt(from); it.add(to, p) }
-                                        s.upd(pg.id) { q -> v + q.apps.filter { it !in v } }
+                                        s.upd(pg.id) { q -> q.copy(apps = v + q.apps.filter { it !in v }) }
                                     }
                                 })
                         }
