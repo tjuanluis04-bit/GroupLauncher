@@ -34,6 +34,10 @@ fun JSONObject.toGroup(): Group = Group(
 )
 
 class LauncherState(private val ctx: Context) {
+    companion object {
+        private var inst: LauncherState? = null
+        fun get(c: Context) = inst ?: LauncherState(c.applicationContext).also { inst = it }
+    }
     private val prefs = ctx.getSharedPreferences("launcher", Context.MODE_PRIVATE)
     var edit by mutableStateOf(false)
     var groups by mutableStateOf(
@@ -58,6 +62,12 @@ class LauncherState(private val ctx: Context) {
     fun saveHome(l: List<Group>) { home = l; prefs.edit().putString("home", JSONArray(l.map { it.toJson() }).toString()).apply() }
     fun saveUng(g: Group) { ung = g; prefs.edit().putString("ung", JSONArray(listOf(g.toJson())).toString()).apply() }
     fun addWidget(pageId: String, entry: String) = saveHome(home.map { if (it.id == pageId) it.copy(widgets = it.widgets + entry) else it })
+    /** Añade un atajo (o app) a la primera página del Home con espacio libre. */
+    fun addToHome(key: String) {
+        if (home.any { key in it.apps }) return
+        val i = home.indexOfFirst { it.apps.size < it.cols * it.rows }.coerceAtLeast(0)
+        saveHome(home.mapIndexed { k, p -> if (k == i) p.copy(apps = p.apps + key) else p })
+    }
     fun toggleHome() { homeEnabled = !homeEnabled; prefs.edit().putBoolean("homeOn", homeEnabled).apply() }
     fun find(id: String): Group? = (groups + groups.flatMap { it.subs } + home + ung).find { it.id == id }
 

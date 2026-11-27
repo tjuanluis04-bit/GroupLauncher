@@ -27,8 +27,22 @@ jobs:
           dl monoton/Monoton-Regular.ttf monoton
           dl "dancingscript/DancingScript%5Bwght%5D.ttf" dancingscript
           dl "playfairdisplay/PlayfairDisplay%5Bwght%5D.ttf" playfair
-      - run: gradle assembleDebug --no-daemon
+          dl "caveat/Caveat%5Bwght%5D.ttf" caveat
+          dl "orbitron/Orbitron%5Bwght%5D.ttf" orbitron
+          dl "cinzel/Cinzel%5Bwght%5D.ttf" cinzel
+          dl greatvibes/GreatVibes-Regular.ttf greatvibes
+          dl pressstart2p/PressStart2P-Regular.ttf pressstart2p
+          dl bangers/Bangers-Regular.ttf bangers
+          dl creepster/Creepster-Regular.ttf creepster
+          dl audiowide/Audiowide-Regular.ttf audiowide
+          dl shadowsintolight/ShadowsIntoLight.ttf shadowsintolight
+          dl ../apache/yellowtail/Yellowtail-Regular.ttf yellowtail
+          dl ../apache/specialelite/SpecialElite-Regular.ttf specialelite
+          dl cookie/Cookie-Regular.ttf cookie
+          dl ../apache/chewy/Chewy-Regular.ttf chewy
+          dl blackopsone/BlackOpsOne-Regular.ttf blackopsone
+      - run: gradle assembleRelease --no-daemon
       - uses: actions/upload-artifact@v4
         with:
-          name: GroupLauncher-debug
-          path: app/build/outputs/apk/debug/*.apk
+          name: GroupLauncher
+          path: app/build/outputs/apk/release/*.apk

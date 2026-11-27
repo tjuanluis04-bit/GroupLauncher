@@ -3,7 +3,10 @@ package com.example.grouplauncher
 import android.appwidget.AppWidgetHost
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.IntentFilter
+import android.content.pm.LauncherApps
 import android.content.SharedPreferences
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -18,6 +21,8 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.slideInVertically
 import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.*
+import androidx.compose.foundation.gestures.detectDragGestures
+import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.layout.*
@@ -35,7 +40,11 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
@@ -75,7 +84,7 @@ object WidgetBridge {
     var add: (AppWidgetProviderInfo, String) -> Unit = { _, _ -> }
 }
 
-class WItem(val info: AppWidgetProviderInfo, val label: String, val app: String, val preview: ImageBitmap?)
+class WGroup(val pkg: String, val name: String, val icon: ImageBitmap?, val items: List<AppWidgetProviderInfo>)
 
 sealed class Dlg {
     object NewGroup : Dlg()
@@ -96,17 +105,31 @@ fun List<String>.moved(p: String, d: Int): List<String> {
     return toMutableList().also { val t = it[i]; it[i] = it[j]; it[j] = t }
 }
 
-/** Tipografías: se descargan de Google Fonts al compilar (assets/fonts). Si falta alguna, usa la normal. */
+/** Tipografías: se descargan de Google Fonts al compilar (assets/fonts). Solo se ofrecen las disponibles. */
 object Fonts {
-    val names = listOf("Normal", "Pacifico", "Lobster", "Bebas Neue", "Righteous", "Abril Fatface", "Satisfy", "Marker", "Monoton", "Dancing", "Playfair", "Serif")
-    private val files = listOf(null, "pacifico", "lobster", "bebasneue", "righteous", "abrilfatface", "satisfy", "permanentmarker", "monoton", "dancingscript", "playfair", null)
+    private val all = listOf(
+        "Normal" to null, "Pacifico" to "pacifico", "Lobster" to "lobster", "Bebas Neue" to "bebasneue", "Righteous" to "righteous",
+        "Abril Fatface" to "abrilfatface", "Satisfy" to "satisfy", "Marker" to "permanentmarker", "Monoton" to "monoton",
+        "Dancing" to "dancingscript", "Playfair" to "playfair", "Serif" to "#serif", "Mono" to "#mono", "Cursiva" to "#cursive",
+        "Caveat" to "caveat", "Orbitron" to "orbitron", "Cinzel" to "cinzel", "Great Vibes" to "greatvibes", "Pixel" to "pressstart2p",
+        "Bangers" to "bangers", "Creepster" to "creepster", "Audiowide" to "audiowide", "Sombras" to "shadowsintolight",
+        "Yellowtail" to "yellowtail", "Máquina" to "specialelite", "Cookie" to "cookie", "Chewy" to "chewy", "Black Ops" to "blackopsone",
+    )
+    val names = all.map { it.first }
     private val cache = HashMap<Int, FontFamily>()
+    private var present: Set<String>? = null
+    private fun has(ctx: Context, f: String): Boolean {
+        val p = present ?: (ctx.assets.list("fonts")?.toSet() ?: emptySet()).also { present = it }
+        return "$f.ttf" in p
+    }
+    fun available(ctx: Context) = all.indices.filter { val f = all[it].second; f == null || f.startsWith("#") || has(ctx, f) }
     fun get(ctx: Context, i: Int): FontFamily = cache.getOrPut(i) {
-        val f = files.getOrNull(i)
-        when {
-            i == 11 -> FontFamily.Serif
-            f != null && ctx.assets.list("fonts")?.contains("$f.ttf") == true -> FontFamily(Font("fonts/$f.ttf", ctx.assets))
-            else -> FontFamily.Default
+        when (val f = all.getOrNull(i)?.second) {
+            null -> FontFamily.Default
+            "#serif" -> FontFamily.Serif
+            "#mono" -> FontFamily.Monospace
+            "#cursive" -> FontFamily.Cursive
+            else -> if (has(ctx, f)) FontFamily(Font("fonts/$f.ttf", ctx.assets)) else FontFamily.Default
         }
     }
 }
@@ -161,16 +184,20 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        state = LauncherState(this)
+        state = LauncherState.get(this)
         NewTracker.init(this)
         host = AppWidgetHost(this, 1024)
         awm = AppWidgetManager.getInstance(this)
         WidgetBridge.host = host
         WidgetBridge.add = this::startAddWidget
+        registerReceiver(pkgReceiver, IntentFilter().apply {
+            addAction(Intent.ACTION_PACKAGE_ADDED); addAction(Intent.ACTION_PACKAGE_REMOVED)
+            addAction(Intent.ACTION_PACKAGE_REPLACED); addDataScheme("package")
+        })
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(primary = Color(0xFF8AB4F8))) {
                 var apps by remember { mutableStateOf(emptyMap<String, AppInfo>()) }
-                LaunchedEffect(tick) { apps = withContext(Dispatchers.Default) { loadApps() } }
+                LaunchedEffect(tick) { apps = withContext(Dispatchers.Default) { loadApps(apps) } }
                 App(state, apps)
             }
         }
@@ -179,17 +206,40 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) { super.onNewIntent(intent); state.drawerOpen = false } // botón Home
     override fun onResume() { super.onResume(); tick++ }
     override fun onStart() { super.onStart(); runCatching { host.startListening() } }
+    override fun onDestroy() { super.onDestroy(); runCatching { unregisterReceiver(pkgReceiver) } }
     override fun onStop() { super.onStop(); runCatching { host.stopListening() } }
 
-    private fun loadApps(): Map<String, AppInfo> {
+    private val dirty = mutableSetOf<String>()
+    private val pkgReceiver = object : BroadcastReceiver() {
+        override fun onReceive(c: Context?, i: Intent?) {
+            i?.data?.schemeSpecificPart?.let { synchronized(dirty) { dirty += it } }
+            tick++
+        }
+    }
+
+    /** Reutiliza iconos ya cargados; solo carga lo nuevo o modificado. */
+    private fun loadApps(prev: Map<String, AppInfo>): Map<String, AppInfo> {
+        val ds = synchronized(dirty) { dirty.toSet().also { dirty.clear() } }
+        val out = LinkedHashMap<String, AppInfo>()
         val i = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
-        return packageManager.queryIntentActivities(i, PackageManager.MATCH_ALL)
-            .filter { it.activityInfo.packageName != packageName }
-            .associate {
-                val p = it.activityInfo.packageName
-                p to AppInfo(p, it.loadLabel(packageManager).toString(), it.loadIcon(packageManager).toBitmap(144, 144).asImageBitmap(),
-                    runCatching { packageManager.getPackageInfo(p, 0).firstInstallTime }.getOrDefault(0L))
+        packageManager.queryIntentActivities(i, PackageManager.MATCH_ALL).forEach {
+            val p = it.activityInfo.packageName
+            if (p == packageName || p in out) return@forEach
+            out[p] = prev[p]?.takeIf { _ -> p !in ds } ?: AppInfo(
+                p, it.loadLabel(packageManager).toString(), it.loadIcon(packageManager).toBitmap(128, 128).asImageBitmap(),
+                runCatching { packageManager.getPackageInfo(p, 0).firstInstallTime }.getOrDefault(0L))
+        }
+        // Accesos directos fijados (Chrome, Firefox, Kiwi…): solo si somos el launcher predeterminado.
+        runCatching {
+            val la = getSystemService(LauncherApps::class.java)
+            val q = LauncherApps.ShortcutQuery().setQueryFlags(LauncherApps.ShortcutQuery.FLAG_MATCH_PINNED)
+            la.getShortcuts(q, android.os.Process.myUserHandle())?.forEach { si ->
+                val key = "sc:${si.getPackage()}|${si.id}"
+                val ic = prev[key]?.icon ?: la.getShortcutIconDrawable(si, 0)?.toBitmap(128, 128)?.asImageBitmap() ?: return@forEach
+                out[key] = AppInfo(key, (si.shortLabel ?: si.longLabel ?: "").toString(), ic)
             }
+        }
+        return out
     }
 }
 
@@ -238,7 +288,7 @@ fun HomeScreen(s: LauncherState, apps: Map<String, AppInfo>) {
                     TextButton({ s.saveHome(s.home + Group(name = "Página ${s.home.size + 1}", rows = 5, size = 56)) }) { Text("+ Página") }
                     if (pages.size > 1) TextButton({ s.saveHome(s.home - pg) }) { Text("Borrar") }
                 }
-                pg.widgets.forEach { e -> WidgetView(e, pg, s) }
+                pg.widgets.forEach { e -> key(e) { WidgetView(e, pg, s) } }
                 Box(Modifier.weight(1f).padding(top = 8.dp)) { HomeGrid(pg, s, apps) }
                 Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
                     if (pages.size > 1) Row {
@@ -265,7 +315,16 @@ fun HomeGrid(pg: Group, s: LauncherState, apps: Map<String, AppInfo>) {
                     Box(Modifier.weight(1f).fillMaxHeight()) {
                         list.getOrNull(r * pg.cols + c)?.let { a ->
                             Cell(a, pg.size, { p -> s.upd(pg.id) { it.copy(apps = it.apps - p) } }, null,
-                                { p, d -> s.upd(pg.id) { it.copy(apps = it.apps.moved(p, d)) } }, null)
+                                { p, d -> s.upd(pg.id) { it.copy(apps = it.apps.moved(p, d)) } }, null,
+                                onDrop = { p, dc, dr ->
+                                    val vis = list.map { it.pkg }
+                                    val from = vis.indexOf(p)
+                                    val to = (from + dc + dr * pg.cols).coerceIn(0, vis.size - 1)
+                                    if (from >= 0 && to != from) {
+                                        val v = vis.toMutableList().also { it.removeAt(from); it.add(to, p) }
+                                        s.upd(pg.id) { q -> v + q.apps.filter { it !in v } }
+                                    }
+                                })
                         }
                     }
                 }
@@ -280,14 +339,29 @@ fun WidgetView(entry: String, pg: Group, s: LauncherState) {
     val parts = entry.split(":")
     val id = parts[0].toIntOrNull() ?: return
     val h = parts.getOrNull(1)?.toIntOrNull() ?: 120
+    val maxW = LocalConfiguration.current.screenWidthDp - 32
+    val w = (parts.getOrNull(2)?.toIntOrNull() ?: 0).let { if (it <= 0) maxW else it.coerceAtMost(maxW) }
     val info = remember(id) { AppWidgetManager.getInstance(ctx).getAppWidgetInfo(id) }
-    val w = LocalConfiguration.current.screenWidthDp - 32
-    fun setH(n: Int) = s.upd(pg.id) { p -> p.copy(widgets = p.widgets.map { if (it == entry) "$id:${n.coerceIn(60, 600)}" else it }) }
-    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp)) {
-        if (s.edit) Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("Widget · ${h}dp", color = Color.White.copy(.7f), fontSize = 12.sp, modifier = Modifier.weight(1f))
-            MiniBtn(Icons.Default.KeyboardArrowUp) { setH(h + 40) }
-            MiniBtn(Icons.Default.KeyboardArrowDown) { setH(h - 40) }
+    fun resize(dh: Int, dw: Int) {
+        val nh = (h + dh).coerceIn(60, 700); val nw = (w + dw).coerceIn(100, maxW)
+        s.upd(pg.id) { p -> p.copy(widgets = p.widgets.map { if (it == entry) "$id:$nh:${if (nw >= maxW) 0 else nw}" else it }) }
+    }
+    Column(Modifier.fillMaxWidth().padding(vertical = 4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        if (s.edit) Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Icon(Icons.Default.Menu, "Arrastrar", tint = Color.White, modifier = Modifier.padding(8.dp).pointerInput(entry) {
+                var acc = 0f
+                val th = 100.dp.toPx()
+                detectDragGestures(onDragStart = { acc = 0f }) { c, d ->
+                    c.consume(); acc += d.y
+                    if (acc > th) { s.upd(pg.id) { it.copy(widgets = it.widgets.moved(entry, 1)) }; acc = 0f }
+                    else if (acc < -th) { s.upd(pg.id) { it.copy(widgets = it.widgets.moved(entry, -1)) }; acc = 0f }
+                }
+            })
+            Text("${w}×${h}dp", color = Color.White.copy(.7f), fontSize = 12.sp, modifier = Modifier.weight(1f))
+            MiniBtn(Icons.Default.KeyboardArrowLeft) { resize(0, -40) }
+            MiniBtn(Icons.Default.KeyboardArrowRight) { resize(0, 40) }
+            MiniBtn(Icons.Default.KeyboardArrowUp) { resize(40, 0) }
+            MiniBtn(Icons.Default.KeyboardArrowDown) { resize(-40, 0) }
             MiniBtn(Icons.Default.Delete) {
                 runCatching { WidgetBridge.host.deleteAppWidgetId(id) }
                 s.upd(pg.id) { p -> p.copy(widgets = p.widgets - entry) }
@@ -297,7 +371,7 @@ fun WidgetView(entry: String, pg: Group, s: LauncherState) {
         else AndroidView(
             factory = { c -> WidgetBridge.host.createView(c, id, info) },
             update = { v -> v.updateAppWidgetSize(null, w, h, w, h) },
-            modifier = Modifier.fillMaxWidth().height(h.dp),
+            modifier = Modifier.width(w.dp).height(h.dp),
         )
     }
 }
@@ -305,22 +379,16 @@ fun WidgetView(entry: String, pg: Group, s: LauncherState) {
 @Composable
 fun WidgetPicker(pageId: String, close: () -> Unit) {
     val ctx = LocalContext.current
-    var loaded by remember { mutableStateOf<List<WItem>?>(null) }
+    var groups by remember { mutableStateOf<List<WGroup>?>(null) }
+    var open by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(Unit) {
-        loaded = withContext(Dispatchers.Default) {
+        groups = withContext(Dispatchers.Default) {
             val pm = ctx.packageManager
-            AppWidgetManager.getInstance(ctx).installedProviders.map { i ->
-                val app = runCatching { pm.getApplicationLabel(pm.getApplicationInfo(i.provider.packageName, 0)).toString() }
-                    .getOrDefault(i.provider.packageName)
-                val pv = runCatching {
-                    i.loadPreviewImage(ctx, 0)?.let { d ->
-                        val iw = d.intrinsicWidth.coerceAtLeast(1); val ih = d.intrinsicHeight.coerceAtLeast(1)
-                        val sc = 320f / maxOf(iw, ih)
-                        d.toBitmap((iw * sc).toInt().coerceAtLeast(1), (ih * sc).toInt().coerceAtLeast(1)).asImageBitmap()
-                    }
-                }.getOrNull()
-                WItem(i, i.loadLabel(pm).toString(), app, pv)
-            }.sortedWith(compareBy({ it.app.lowercase() }, { it.label.lowercase() }))
+            AppWidgetManager.getInstance(ctx).installedProviders.groupBy { it.provider.packageName }.map { (p, l) ->
+                val name = runCatching { pm.getApplicationLabel(pm.getApplicationInfo(p, 0)).toString() }.getOrDefault(p)
+                val icon = runCatching { pm.getApplicationIcon(p).toBitmap(96, 96).asImageBitmap() }.getOrNull()
+                WGroup(p, name, icon, l.sortedBy { it.loadLabel(pm).lowercase() })
+            }.sortedBy { it.name.lowercase() }
         }
     }
     AlertDialog(onDismissRequest = close,
@@ -329,24 +397,48 @@ fun WidgetPicker(pageId: String, close: () -> Unit) {
         title = { Text("Añadir widget") },
         confirmButton = { TextButton(close) { Text("Cancelar") } },
         text = {
-            val list = loaded
+            val list = groups
             if (list == null) Text("Cargando…")
-            else LazyColumn(Modifier.heightIn(max = 480.dp)) {
-                items(list) { w ->
-                    Row(Modifier.fillMaxWidth().clickable { WidgetBridge.add(w.info, pageId); close() }.padding(vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically) {
-                        Box(Modifier.size(84.dp), contentAlignment = Alignment.Center) {
-                            if (w.preview != null) Image(w.preview, null, Modifier.fillMaxSize()) else Icon(Icons.Default.Add, null)
-                        }
-                        Spacer(Modifier.width(12.dp))
-                        Column {
-                            Text(w.label, fontSize = 16.sp)
-                            Text(w.app, fontSize = 12.sp, color = Color.Gray)
+            else LazyColumn(Modifier.heightIn(max = 520.dp)) {
+                list.forEach { g ->
+                    item(key = g.pkg) {
+                        Row(Modifier.fillMaxWidth().clickable { open = if (open == g.pkg) null else g.pkg }.padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically) {
+                            if (g.icon != null) Image(g.icon, null, Modifier.size(40.dp)) else Spacer(Modifier.size(40.dp))
+                            Spacer(Modifier.width(12.dp))
+                            Column(Modifier.weight(1f)) {
+                                Text(g.name, fontSize = 16.sp)
+                                Text("${g.items.size} widget(s)", fontSize = 12.sp, color = Color.Gray)
+                            }
+                            Icon(if (open == g.pkg) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown, null)
                         }
                     }
+                    if (open == g.pkg) items(g.items) { w -> WidgetRow(w, pageId, close) }
                 }
             }
         })
+}
+
+@Composable
+fun WidgetRow(w: AppWidgetProviderInfo, pageId: String, close: () -> Unit) {
+    val ctx = LocalContext.current
+    val pv by produceState<ImageBitmap?>(null, w) {
+        value = withContext(Dispatchers.Default) {
+            runCatching {
+                w.loadPreviewImage(ctx, 0)?.let { d ->
+                    val iw = d.intrinsicWidth.coerceAtLeast(1); val ih = d.intrinsicHeight.coerceAtLeast(1)
+                    val sc = 320f / maxOf(iw, ih)
+                    d.toBitmap((iw * sc).toInt().coerceAtLeast(1), (ih * sc).toInt().coerceAtLeast(1)).asImageBitmap()
+                }
+            }.getOrNull()
+        }
+    }
+    Row(Modifier.fillMaxWidth().clickable { WidgetBridge.add(w, pageId); close() }.padding(start = 20.dp, top = 8.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically) {
+        Box(Modifier.size(84.dp), contentAlignment = Alignment.Center) { pv?.let { Image(it, null, Modifier.fillMaxSize()) } }
+        Spacer(Modifier.width(12.dp))
+        Text(w.loadLabel(ctx.packageManager), fontSize = 15.sp)
+    }
 }
 
 // ───────────── CAJÓN DE APPS ─────────────
@@ -359,12 +451,15 @@ fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
     var selecting by remember { mutableStateOf(false) }
     var sel by remember { mutableStateOf(setOf<String>()) }
     val selObj = Sel(selecting, sel, { p -> sel = if (p in sel) sel - p else sel + p }, { p -> selecting = true; sel = setOf(p) })
-    val shown = if (query.isBlank()) s.groups else s.groups.filter { g ->
-        g.name.contains(query, true) || g.subs.any { it.name.contains(query, true) }
+    val shown = remember(s.groups, query) {
+        if (query.isBlank()) s.groups else s.groups.filter { g -> g.name.contains(query, true) || g.subs.any { it.name.contains(query, true) } }
     }
-    val grouped = s.groups.flatMap { it.apps + it.subs.flatMap { sg -> sg.apps } }.toSet()
-    val ungrouped = apps.values.filter { it.pkg !in grouped && (query.isBlank() || it.label.contains(query, true)) }
-        .sortedWith(compareBy({ !NewTracker.isNew(it) }, { it.label.lowercase() }))
+    val grouped = remember(s.groups) { s.groups.flatMap { it.apps + it.subs.flatMap { sg -> sg.apps } }.toSet() }
+    val seen = NewTracker.seen
+    val ungrouped = remember(apps, grouped, query, seen) {
+        apps.values.filter { it.pkg !in grouped && !it.pkg.startsWith("sc:") && (query.isBlank() || it.label.contains(query, true)) }
+            .sortedWith(compareBy({ !NewTracker.isNew(it) }, { it.label.lowercase() }))
+    }
     Box(Modifier.fillMaxSize().background(Color(0x66000000))) {
         LazyColumn(
             Modifier.fillMaxSize().statusBarsPadding(),
@@ -489,7 +584,7 @@ fun AppGrid(
     pkgs: List<String>, cfg: Group, apps: Map<String, AppInfo>, sel: Sel? = null,
     onAdd: ((String) -> Unit)? = null, onMove: ((String, Int) -> Unit)? = null, onRemove: ((String) -> Unit)? = null,
 ) {
-    val list = pkgs.mapNotNull { apps[it] }
+    val list = remember(pkgs, apps) { pkgs.mapNotNull { apps[it] } }
     if (list.isEmpty()) { Text("Vacío", color = Color.White.copy(.5f), fontSize = 13.sp); return }
     val pages = list.chunked(cfg.cols * cfg.rows)
     val pager = rememberPagerState { pages.size }
@@ -512,17 +607,46 @@ fun AppGrid(
     }
 }
 
+fun launch(ctx: Context, pkg: String) {
+    if (pkg.startsWith("sc:")) {
+        val (p, id) = pkg.removePrefix("sc:").split("|")
+        runCatching { ctx.getSystemService(LauncherApps::class.java).startShortcut(p, id, null, null, android.os.Process.myUserHandle()) }
+    } else {
+        NewTracker.mark(pkg)
+        ctx.packageManager.getLaunchIntentForPackage(pkg)?.let(ctx::startActivity)
+    }
+}
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun Cell(a: AppInfo, size: Int, onRemove: ((String) -> Unit)?, onAdd: ((String) -> Unit)?, onMove: ((String, Int) -> Unit)?, sel: Sel?) {
+fun Cell(
+    a: AppInfo, size: Int, onRemove: ((String) -> Unit)?, onAdd: ((String) -> Unit)?, onMove: ((String, Int) -> Unit)?, sel: Sel?,
+    onDrop: ((String, Int, Int) -> Unit)? = null, // Home: mantener y arrastrar para reordenar
+) {
     val ctx = LocalContext.current
     var menu by remember { mutableStateOf(false) }
+    var off by remember { mutableStateOf(Offset.Zero) }
+    var sz by remember { mutableStateOf(IntSize.Zero) }
     val selecting = sel?.on == true
+    val gesture = if (onDrop != null) Modifier.pointerInput(a.pkg) {
+        detectDragGesturesAfterLongPress(
+            onDragStart = { off = Offset.Zero },
+            onDrag = { c, d -> c.consume(); off += d },
+            onDragEnd = {
+                if (off.getDistance() < 16f) menu = true
+                else if (sz.width > 0 && sz.height > 0) onDrop(a.pkg, Math.round(off.x / sz.width), Math.round(off.y / sz.height))
+                off = Offset.Zero
+            },
+            onDragCancel = { off = Offset.Zero },
+        )
+    }.clickable { launch(ctx, a.pkg) }
+    else Modifier.combinedClickable(
+        onClick = { if (selecting) sel!!.toggle(a.pkg) else launch(ctx, a.pkg) },
+        onLongClick = { if (selecting) sel!!.toggle(a.pkg) else menu = true },
+    )
     Column(
-        Modifier.fillMaxSize().clip(RoundedCornerShape(12.dp)).combinedClickable(
-            onClick = { if (selecting) sel!!.toggle(a.pkg) else { NewTracker.mark(a.pkg); ctx.packageManager.getLaunchIntentForPackage(a.pkg)?.let(ctx::startActivity) } },
-            onLongClick = { if (selecting) sel!!.toggle(a.pkg) else menu = true },
-        ).padding(2.dp),
+        Modifier.fillMaxSize().onSizeChanged { sz = it }.graphicsLayer { translationX = off.x; translationY = off.y }
+            .clip(RoundedCornerShape(12.dp)).then(gesture).padding(2.dp),
         horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.Center,
     ) {
         Box {
@@ -551,7 +675,7 @@ fun Cell(a: AppInfo, size: Int, onRemove: ((String) -> Unit)?, onAdd: ((String) 
             if (onRemove != null) DropdownMenuItem({ Text("Quitar") }, { menu = false; onRemove(a.pkg) })
             if (onAdd != null) DropdownMenuItem({ Text("Añadir a un grupo…") }, { menu = false; onAdd(a.pkg) })
             if (sel != null) DropdownMenuItem({ Text("Seleccionar varias") }, { menu = false; sel.start(a.pkg) })
-            DropdownMenuItem({ Text("Info de la app") }, {
+            if (!a.pkg.startsWith("sc:")) DropdownMenuItem({ Text("Info de la app") }, {
                 menu = false
                 ctx.startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:${a.pkg}")))
             })
@@ -638,7 +762,8 @@ fun SettingsDialog(g: Group, s: LauncherState, close: () -> Unit) {
                 Sl("Tamaño de icono", g.size, 32..96) { v -> up { it.copy(size = v) } }
                 Text("Tipografía del título", fontSize = 14.sp)
                 Row(Modifier.horizontalScroll(rememberScrollState()).padding(vertical = 8.dp), Arrangement.spacedBy(8.dp)) {
-                    Fonts.names.forEachIndexed { i, n ->
+                    Fonts.available(ctx).forEach { i ->
+                        val n = Fonts.names[i]
                         val on = g.font == i
                         Text(n, fontFamily = Fonts.get(ctx, i), fontSize = 18.sp, color = if (on) Color.Black else Color.White,
                             modifier = Modifier.clip(RoundedCornerShape(50)).background(if (on) Color(0xFF8AB4F8) else Color(0x33FFFFFF))
