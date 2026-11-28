@@ -68,6 +68,27 @@ class LauncherState(private val ctx: Context) {
         val i = home.indexOfFirst { it.apps.size < it.cols * it.rows }.coerceAtLeast(0)
         saveHome(home.mapIndexed { k, p -> if (k == i) p.copy(apps = p.apps + key) else p })
     }
+    /** Respaldo completo (grupos, subgrupos, páginas Home y ajustes). Los widgets no se respaldan: sus ids son propios de cada instalación. */
+    fun exportJson(): String = JSONObject().put("v", 1)
+        .put("groups", JSONArray(groups.map { it.toJson() }))
+        .put("home", JSONArray(home.map { it.copy(widgets = emptyList()).toJson() }))
+        .put("ung", ung.toJson()).put("homeOn", homeEnabled).toString(2)
+
+    fun importJson(text: String): Boolean = runCatching {
+        val o = JSONObject(text)
+        val g = o.getJSONArray("groups").let { a -> List(a.length()) { a.getJSONObject(it).toGroup() } }
+        set(g)
+        o.optJSONArray("home")?.takeIf { it.length() > 0 }?.let { a ->
+            saveHome(List(a.length()) { i ->
+                val p = a.getJSONObject(i).toGroup()
+                p.copy(widgets = home.find { it.id == p.id }?.widgets ?: emptyList())
+            })
+        }
+        o.optJSONObject("ung")?.let { saveUng(it.toGroup()) }
+        if (o.has("homeOn") && o.getBoolean("homeOn") != homeEnabled) toggleHome()
+        true
+    }.getOrDefault(false)
+
     fun toggleHome() { homeEnabled = !homeEnabled; prefs.edit().putBoolean("homeOn", homeEnabled).apply() }
     fun find(id: String): Group? = (groups + groups.flatMap { it.subs } + home + ung).find { it.id == id }
 

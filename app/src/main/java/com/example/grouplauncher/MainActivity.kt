@@ -4,6 +4,9 @@ import android.appwidget.AppWidgetHost
 import android.appwidget.AppWidgetManager
 import android.appwidget.AppWidgetProviderInfo
 import android.content.BroadcastReceiver
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import android.content.Context
 import android.content.IntentFilter
 import android.content.pm.LauncherApps
@@ -445,6 +448,19 @@ fun WidgetRow(w: AppWidgetProviderInfo, pageId: String, close: () -> Unit) {
 @Composable
 fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
     val ctx = LocalContext.current
+    var confirmImport by remember { mutableStateOf(false) }
+    val exp = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            val ok = runCatching { ctx.contentResolver.openOutputStream(uri)!!.use { it.write(s.exportJson().toByteArray()) } }.isSuccess
+            Toast.makeText(ctx, if (ok) "Respaldo guardado" else "No se pudo guardar", Toast.LENGTH_SHORT).show()
+        }
+    }
+    val imp = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            val txt = runCatching { ctx.contentResolver.openInputStream(uri)!!.bufferedReader().use { it.readText() } }.getOrNull()
+            Toast.makeText(ctx, if (txt != null && s.importJson(txt)) "Respaldo importado" else "Archivo no válido", Toast.LENGTH_SHORT).show()
+        }
+    }
     var dlg by remember { mutableStateOf<Dlg?>(null) }
     var query by remember { mutableStateOf("") }
     var menu by remember { mutableStateOf(false) }
@@ -480,6 +496,8 @@ fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
                                 menu = false; ctx.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
                             })
                             DropdownMenuItem({ Text(if (s.homeEnabled) "Desactivar pantalla Home" else "Activar pantalla Home") }, { menu = false; s.toggleHome() })
+                            DropdownMenuItem({ Text("Exportar respaldo…") }, { menu = false; exp.launch("GroupLauncher-respaldo.json") })
+                            DropdownMenuItem({ Text("Importar respaldo…") }, { menu = false; confirmImport = true })
                             DropdownMenuItem({ Text("Launcher predeterminado…") }, { menu = false; openHomeSettings(ctx) })
                         }
                     }
@@ -525,6 +543,11 @@ fun Drawer(s: LauncherState, apps: Map<String, AppInfo>) {
             }
         }
     }
+    if (confirmImport) AlertDialog(onDismissRequest = { confirmImport = false },
+        title = { Text("Importar respaldo") },
+        text = { Text("Se reemplazarán tus grupos, subgrupos y páginas del Home actuales por los del archivo.") },
+        confirmButton = { TextButton({ confirmImport = false; imp.launch(arrayOf("application/json", "*/*")) }) { Text("Elegir archivo") } },
+        dismissButton = { TextButton({ confirmImport = false }) { Text("Cancelar") } })
     DialogHost(dlg, { dlg = null }, s, apps) { selecting = false; sel = emptySet() }
 }
 
